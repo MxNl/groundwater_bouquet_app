@@ -1,0 +1,8 @@
+Package: groundwaterbouquet
+Title: Groundwater Bouquet Explorer
+Version: 0.0.1
+Depends: R (>= 4.1.0)
+Imports:
+    bouquets
+Remotes:
+    MxNl/bouquets
