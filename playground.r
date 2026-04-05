@@ -11,7 +11,7 @@ library(stringr)
 # Suggestions for the app ------------------------------------------------
 
 # 2. 
-# 3. Geocode now returns location from all over the world instead of germany
+# 3. 
 # 4. Add another button with the feature to compare 2 locations. Copy the ui and behaviour of the single location mode/tab but add a second address input field and split the current row of the 2 plots into two rows to show the plots of the second location in the lower row. The plot settings from the sidebar affect plots of both locations.
 
 

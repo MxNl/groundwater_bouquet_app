@@ -31,7 +31,7 @@ library(hues)
 library(bouquets)
 
 # ── Column name constants ─────────────────────────────────────────────────────
-WELL_ID_COL <- "well_id"
+WELL_ID_COL <- "proj_id"
 LON_COL     <- "coords_x"
 LAT_COL     <- "coords_y"
 DATE_COL    <- "date"
@@ -127,20 +127,22 @@ query_timeseries <- function(con, well_ids,
   date_filter <- ""
   if (!is.null(year_from))
     date_filter <- paste0(date_filter,
-      sprintf(" AND date >= '%d-01-01'::DATE", as.integer(year_from)))
+      sprintf(" AND t.date >= '%d-01-01'::DATE", as.integer(year_from)))
   if (!is.null(year_to))
     date_filter <- paste0(date_filter,
-      sprintf(" AND date <= '%d-12-31'::DATE", as.integer(year_to)))
+      sprintf(" AND t.date <= '%d-12-31'::DATE", as.integer(year_to)))
 
+  # Join metadata to swap the internal well_id for proj_id in the output.
   # For weekly resolution keep raw rows; for coarser resolutions aggregate
   # via DATE_TRUNC so we get one representative row per period per well.
   # AVG(gwl) is the summary statistic — change to FIRST/LAST if preferred.
   if (resolution == "week") {
     query <- sprintf(
-      "SELECT well_id, date::DATE AS date, gwl
-         FROM timeseries
-        WHERE well_id IN (%s)%s
-        ORDER BY well_id, date",
+      "SELECT m.proj_id AS proj_id, t.date::DATE AS date, t.gwl
+         FROM timeseries t
+         JOIN metadata   m ON m.well_id = t.well_id
+        WHERE t.well_id IN (%s)%s
+        ORDER BY m.proj_id, t.date",
       ids_sql, date_filter
     )
   } else {
@@ -151,14 +153,15 @@ query_timeseries <- function(con, well_ids,
       "month"   # safe fallback
     )
     query <- sprintf(
-      "SELECT well_id,
-              DATE_TRUNC('%s', date)::DATE AS date,
-              AVG(gwl) AS gwl
-         FROM timeseries
-        WHERE well_id IN (%s)%s
-        GROUP BY well_id, DATE_TRUNC('%s', date)
-        ORDER BY well_id, date",
-      trunc_unit, ids_sql, date_filter, trunc_unit
+      "SELECT m.proj_id AS proj_id,
+              DATE_TRUNC('%s', t.date)::DATE AS date,
+              AVG(t.gwl) AS gwl
+         FROM timeseries t
+         JOIN metadata   m ON m.well_id = t.well_id
+        WHERE t.well_id IN (%s)%s
+        GROUP BY m.proj_id, DATE_TRUNC('%s', t.date)
+        ORDER BY m.proj_id, DATE_TRUNC('%s', t.date)",
+      trunc_unit, ids_sql, date_filter, trunc_unit, trunc_unit
     )
   }
 
@@ -307,7 +310,7 @@ ui <- bslib::page_navbar(
             bsicons::bs_icon("palette"), " Plot options"
           ),
           uiOutput("marker_every_ui"),
-          checkboxInput("show_labels",  "Show path labels",  value = FALSE),
+          checkboxInput("show_labels",  "Show well labels",  value = FALSE),
           checkboxInput("show_rings",   "Show rings",        value = FALSE),
           checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
           checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
@@ -642,9 +645,11 @@ server <- function(input, output, session) {
 
     # All filtering and resampling happens in DuckDB — nothing loaded into R
     # beyond the rows actually needed for the plot.
+    # Filter by the internal well_id; the query JOINs metadata to return proj_id.
+    internal_ids <- nearest_meta()$well_id
     ts <- query_timeseries(
       gw_con,
-      well_ids   = ids,
+      well_ids   = internal_ids,
       year_from  = yr_from,
       year_to    = yr_to,
       resolution = input$resolution
@@ -739,14 +744,17 @@ server <- function(input, output, session) {
   })
 
   # ── Reactive: plot title with address, date range and resolution ──────────────
+  # stringr::str_wrap() inserts newlines so long addresses never overflow the
+  # plot edge — ggplot2 naturally reflows the title across multiple lines.
   plot_title <- reactive({
     addr <- confirmed_address()
-    if (is.null(addr) || nchar(addr) == 0) {
-      sprintf('Groundwater level dynamics · %d nearest wells', input$n_wells)
+    raw <- if (is.null(addr) || nchar(addr) == 0) {
+      sprintf('Groundwater level dynamics \u00b7 %d nearest wells', input$n_wells)
     } else {
-      sprintf('Groundwater level dynamics · %d nearest wells to "%s"',
+      sprintf('Groundwater level dynamics \u00b7 %d nearest wells to "%s"',
               input$n_wells, addr)
     }
+    stringr::str_wrap(raw, width = 55)
   })
 
   # ── Render marker_every UI: slider or info text depending on resolution ───────
@@ -819,6 +827,7 @@ server <- function(input, output, session) {
           flower_colors = cluster,
           highlight     = hw,
           show_labels   = isTRUE(input$show_labels),
+          label_color   = "#999999",
           show_rings    = isTRUE(input$show_rings),
           marker_every  = marker_arg,
           dark_mode     = isTRUE(input$dark_mode),
@@ -835,6 +844,7 @@ server <- function(input, output, session) {
           flower_colors = "blossom",
           highlight     = hw,
           show_labels   = isTRUE(input$show_labels),
+          label_color   = "#999999",
           show_rings    = isTRUE(input$show_rings),
           marker_every  = marker_arg,
           dark_mode     = isTRUE(input$dark_mode),
@@ -843,12 +853,15 @@ server <- function(input, output, session) {
         )
       }
 
-      if (!isTRUE(input$show_legend)) {
-        p <- patchwork::wrap_plots(p) & ggplot2::theme(legend.position = "none")
-      }
-
-      bg_col <- if (isTRUE(input$dark_mode)) "#1a1a2e" else "#f5f0e8"
-      ggplot2::ggsave(file, plot = p, width = 12, height = 10, dpi = 300, bg = bg_col)
+      # Extract the underlying ggplot from the bouquet S7 object and override
+      # plot.background so ggsave uses a single uniform colour with no layering.
+      bg_col <- if (isTRUE(input$dark_mode)) "#1a1a2e" else "#f8f8f5"
+      gg <- patchwork::wrap_plots(p)[[1L]] +
+        ggplot2::theme(
+          plot.background  = ggplot2::element_rect(fill = bg_col, colour = NA),
+          panel.background = ggplot2::element_rect(fill = bg_col, colour = NA)
+        )
+      ggplot2::ggsave(file, plot = gg, width = 12, height = 10, dpi = 300, bg = bg_col)
     }
   )
 
@@ -931,6 +944,7 @@ server <- function(input, output, session) {
         flower_colors = cluster,
         highlight     = hw,
         show_labels   = isTRUE(input$show_labels),
+        label_color   = "#999999",
         show_rings    = isTRUE(input$show_rings),
         marker_every  = marker_arg,
         dark_mode     = isTRUE(input$dark_mode),
@@ -938,21 +952,22 @@ server <- function(input, output, session) {
         verbose       = FALSE
       )
     } else {
-      bouquets::make_plot_bouquet(
-        df,
-        time_col      = !!sym(DATE_COL),
-        series_col    = !!sym(WELL_ID_COL),
-        value_col     = !!sym(VALUE_COL),
-        stem_colors   = "greens",
-        flower_colors = "blossom",
-        highlight     = hw,
-        show_labels   = isTRUE(input$show_labels),
-        show_rings    = isTRUE(input$show_rings),
-        marker_every  = marker_arg,
-        dark_mode     = isTRUE(input$dark_mode),
-        title         = plot_title(),
-        verbose       = FALSE
-      )
+        bouquets::make_plot_bouquet(
+          df,
+          time_col      = !!sym(DATE_COL),
+          series_col    = !!sym(WELL_ID_COL),
+          value_col     = !!sym(VALUE_COL),
+          stem_colors   = "greens",
+          flower_colors = "blossom",
+          highlight     = hw,
+          show_labels   = isTRUE(input$show_labels),
+          label_color   = "#999999",
+          show_rings    = isTRUE(input$show_rings),
+          marker_every  = marker_arg,
+          dark_mode     = isTRUE(input$dark_mode),
+          title         = plot_title(),
+          verbose       = FALSE
+        )
     }
 
     # Apply legend: convert to patchwork first so & operator works
@@ -1073,8 +1088,7 @@ server <- function(input, output, session) {
         fillColor   = "#888888",
         fillOpacity = 0.35,
         weight      = 1,
-        opacity     = 0.5,
-        label       = ~well_id
+        opacity     = 0.5
       ) |>
 
       # ── Target location pin ───────────────────────────────────────────────────
@@ -1103,16 +1117,33 @@ server <- function(input, output, session) {
         fillOpacity = 0.85,
         radius      = 9,
         weight      = 1.5,
-        label       = ~htmltools::HTML(sprintf(
-          "<b>%s</b><br/>%.2f km from target",
-          get(WELL_ID_COL), dist_km
-        )),
+        label        = if (isTRUE(input$show_labels)) ~as.character(get(WELL_ID_COL)) else NULL,
+        labelOptions = leaflet::labelOptions(
+          permanent  = TRUE,
+          direction  = "right",
+          offset     = c(10, 0),
+          textOnly   = TRUE,
+          style      = list(
+            "font-size"   = "10px",
+            "font-weight" = "600",
+            "color"       = "#999999",
+            "text-shadow" = "0 0 3px #ffffff, 0 0 3px #ffffff"
+          )
+        ),
         popup = popup_html
       ) |>
       leaflet::addLayersControl(
         overlayGroups = c("all_wells", "wells", "lines", "target"),
-        options       = leaflet::layersControlOptions(collapsed = TRUE)
+        options       = leaflet::layersControlOptions(collapsed = TRUE, autoZIndex = TRUE)
       ) |>
+      htmlwidgets::onRender("
+        function(el, x) {
+          // Remove the title attribute from the layers toggle button so no
+          // browser tooltip appears when hovering over the layers control.
+          var toggle = el.querySelector('.leaflet-control-layers-toggle');
+          if (toggle) toggle.removeAttribute('title');
+        }
+      ") |>
       leaflet::fitBounds(
         lng1 = min(c(meta$lon_wgs84, loc$lon)) - 0.1,
         lat1 = min(c(meta$lat_wgs84, loc$lat)) - 0.1,

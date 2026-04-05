@@ -18,7 +18,7 @@ DB_PATH   <- "groundwater.duckdb"
 META_FILE <- "data/data_gems_meta.csv"
 TS_FILE   <- "data/data_gems_dynamic.csv"
 
-# Metadata columns : well_id, coords_x, coords_y, depth, up_filter,
+# Metadata columns : well_id, proj_id, coords_x, coords_y, depth, up_filter,
 #                    lo_filter, scr_length, aquifer_med, pre_state
 # Timeseries columns: well_id, date, gwl
 
