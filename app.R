@@ -30,6 +30,8 @@ library(shinyjs)
 library(hues)
 library(bouquets)
 
+source("location_module.R")
+
 # ── Column name constants ─────────────────────────────────────────────────────
 WELL_ID_COL <- "proj_id"
 LON_COL     <- "coords_x"
@@ -233,6 +235,14 @@ ui <- bslib::page_navbar(
   navbar_options = bslib::navbar_options(bg = "#2C7BB6"),
   header = tagList(
     shinyjs::useShinyjs(),
+    tags$style(HTML("
+      /* Full-height layout for the bslib grid rows */
+      #loc_a_panels_row, #loc_b_panels_row { width: 100%; }
+      #loc_a_panels_row .bslib-grid,
+      #loc_b_panels_row .bslib-grid {
+        height: 100%;
+      }
+    ")),
     # Intro modal — shown on first load
     tags$script(HTML("
       $(document).ready(function() {
@@ -241,13 +251,16 @@ ui <- bslib::page_navbar(
           Shiny.setInputValue('show_intro', 1, {priority: 'event'});
         }, 300);
 
-        // Enter key in address input fires the Shiny button click normally
-        $(document).on('keydown', '#address', function(e) {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            var btn = document.getElementById('geocode_btn');
-            if (btn && !btn.disabled) { btn.click(); }
-          }
+        // Dynamic Enter-key binding: called once per module instance
+        Shiny.addCustomMessageHandler('bindEnterKey', function(msg) {
+          $(document).off('keydown.enterKey_' + msg.inputId);
+          $(document).on('keydown.enterKey_' + msg.inputId, '#' + msg.inputId, function(e) {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              var btn = document.getElementById(msg.btnId);
+              if (btn && !btn.disabled) { btn.click(); }
+            }
+          });
         });
 
       });
@@ -263,22 +276,34 @@ ui <- bslib::page_navbar(
         width = 310,
         open  = TRUE,
 
-        # — Location input —
-        bslib::card(
-          bslib::card_header(
-            bsicons::bs_icon("geo-alt-fill"), " Location"
-          ),
-          textInput(
-            "address", NULL,
-            placeholder = "ZIP code or address…",
-            value = ""
-          ),
-          tags$p(
-            style = "font-size:11px; color:#888; margin: -6px 0 6px 0;",
-            "German ZIP code, city name, or full address"
-          ),
-          uiOutput("geocode_btn_ui"),
-          uiOutput("geocode_status_ui")
+        # — Location A input —
+        location_ui("loc_a", "Location A"),
+
+        # — Location B input (hidden until compare toggled) —
+        shinyjs::hidden(
+          div(id = "loc_b_card",
+            location_ui("loc_b", "Location B")
+          )
+        ),
+
+        # — Compare toggle buttons —
+        div(
+          id    = "add_compare_btn_wrap",
+          style = "margin-bottom:6px;",
+          actionButton(
+            "add_compare", "+  Compare with another location",
+            class = "btn btn-sm btn-success w-100"
+          )
+        ),
+        shinyjs::hidden(
+          div(
+            id    = "remove_compare_btn_wrap",
+            style = "margin-bottom:6px;",
+            actionButton(
+              "remove_compare", "\u2715 Remove comparison",
+              class = "btn btn-sm btn-outline-danger w-100"
+            )
+          )
         ),
 
         # — Settings —
@@ -317,46 +342,20 @@ ui <- bslib::page_navbar(
         )
       ),  # /sidebar
 
-      # — Main content area —
-      bslib::layout_columns(
-        col_widths  = c(7, 5),
-        row_heights = "calc(100vh - 140px)",
-
-        # Bouquet plot card
-        bslib::card(
-          full_screen = TRUE,
-          height      = "calc(100vh - 140px)",
-          style       = "background-color: #f5f0e8;",
-          bslib::card_header(
-            style = "background-color: #ede8de;",
-            bsicons::bs_icon("flower1"), " Bouquet Plot",
-            div(
-              style = "float:right; display:flex; gap:6px; align-items:center;",
-              uiOutput("reset_btn_ui"),
-              downloadButton(
-                "download_bouquet", "Download",
-                class = "btn btn-sm btn-outline-primary"
-              )
-            )
-          ),
-          bslib::card_body(
-            padding = 0,
-            style   = "background-color: #f5f0e8;",
-            uiOutput("bouquet_ui")
-          )
-        ),
-
-        # Map card
-        bslib::card(
-          full_screen = TRUE,
-          height      = "calc(100vh - 140px)",
-          bslib::card_header(
-            bsicons::bs_icon("map"), " Well Locations"
-          ),
-          bslib::card_body(
-            padding = 0,
-            leaflet::leafletOutput("well_map", height = "100%")
-          )
+      # — Main content area: both rows always in DOM; row B hidden via CSS —
+      div(
+        id    = "loc_a_panels_row",
+        style = "height: calc(100vh - 140px);",
+        do.call(bslib::layout_columns,
+          c(list(col_widths = c(7, 5), row_heights = "calc(100vh - 140px)"),
+            location_panels_ui("loc_a")))
+      ),
+      shinyjs::hidden(
+        div(
+          id = "loc_b_panels_row",
+          do.call(bslib::layout_columns,
+            c(list(col_widths = c(7, 5), row_heights = "calc(50vh - 90px)"),
+              location_panels_ui("loc_b")))
         )
       )
     )
@@ -548,214 +547,61 @@ server <- function(input, output, session) {
     ))
   })
 
-  # ── Geocode button UI — shows spinner while loading ───────────────────────────
-  output$geocode_btn_ui <- renderUI({
-    actionButton(
-      "geocode_btn", "Find nearest wells",
-      class = "btn-primary w-100",
-      icon  = icon("magnifying-glass")
-    )
-  })
-
-  # ── Reset highlight button — only shown when a well is highlighted ────────────
-  output$reset_btn_ui <- renderUI({
-    req(highlighted_well())
-    actionButton(
-      "reset_highlight", "Reset highlight",
-      class = "btn btn-sm btn-outline-secondary",
-      icon  = icon("rotate-left")
-    )
-  })
-  # Each session gets its own read-only connection. DuckDB allows multiple
-  # concurrent read-only connections to the same file without locking issues.
+  # ── Per-session DuckDB connection ────────────────────────────────────────────
   gw_con <- DBI::dbConnect(duckdb::duckdb(), dbdir = DB_PATH, read_only = TRUE)
 
-  # ── Reactive: geocoded location ─────────────────────────────────────────────
-  target_loc         <- reactiveVal(NULL)
-  confirmed_address  <- reactiveVal(NULL)   # set only on successful geocode
-  # .geocode_cache lives at app level — shared across all sessions
-
-  observeEvent(input$geocode_btn, {
-    query <- trimws(input$address)
-    req(nchar(query) > 0)
-
-    # Show spinner on the button while geocoding runs; restore it when done
-    # (on.exit fires on both success and error paths)
-    shinyjs::html("geocode_btn",
-      '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching…'
-    )
-    shinyjs::disable("geocode_btn")
-    on.exit({
-      shinyjs::html("geocode_btn",
-        '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells'
-      )
-      shinyjs::enable("geocode_btn")
-    })
-
-    # Check cache first — avoids redundant API calls for repeated searches
-    cache_key <- tolower(query)
-    if (exists(cache_key, envir = .geocode_cache)) {
-      loc <- .geocode_cache[[cache_key]]
-    } else {
-      tryCatch({
-        loc <- geocode_address(query)
-        if (!is.na(loc$lat) && !is.na(loc$lon)) {
-          assign(cache_key, loc, envir = .geocode_cache)
-        }
-      }, error = function(e) {
-        showNotification(
-          paste("Geocoding error:", conditionMessage(e)),
-          type = "error", duration = 8
-        )
-        loc <<- list(lat = NA, lon = NA)
-      })
-    }
-
-    if (is.na(loc$lat) || is.na(loc$lon)) {
-      showNotification(
-        "Address not found. Try a more specific query or a different spelling.",
-        type = "warning", duration = 6
-      )
-      target_loc(NULL)
-      confirmed_address(NULL)
-    } else {
-      target_loc(loc)
-      confirmed_address(query)
-    }
+  # ── Compare toggle state ─────────────────────────────────────────────────────
+  observeEvent(input$add_compare, {
+    shinyjs::show("loc_b_card")
+    shinyjs::show("remove_compare_btn_wrap")
+    shinyjs::hide("add_compare_btn_wrap")
+    shinyjs::show("loc_b_panels_row")
+    shinyjs::runjs("
+      var h = 'calc(50vh - 90px)';
+      var a = document.getElementById('loc_a_panels_row');
+      if (a) { a.style.height = h; a.querySelector('.bslib-grid').style.setProperty('--bslib-grid--row-heights', h); }
+    ")
   })
 
-  # ── Reactive: n nearest wells (metadata) ────────────────────────────────────
-  nearest_meta <- reactive({
-    req(target_loc())
-    find_nearest_wells(
-      target_loc()$lon,
-      target_loc()$lat,
-      meta_df,
-      input$n_wells
-    )
+  observeEvent(input$remove_compare, {
+    shinyjs::hide("loc_b_card")
+    shinyjs::hide("remove_compare_btn_wrap")
+    shinyjs::show("add_compare_btn_wrap")
+    shinyjs::hide("loc_b_panels_row")
+    shinyjs::runjs("
+      var h = 'calc(100vh - 140px)';
+      var a = document.getElementById('loc_a_panels_row');
+      if (a) { a.style.height = h; a.querySelector('.bslib-grid').style.setProperty('--bslib-grid--row-heights', h); }
+    ")
   })
 
-  # ── Reactive: filtered + enriched time series ───────────────────────────────
-  selected_ts <- reactive({
-    req(nearest_meta())
-    ids <- nearest_meta()[[WELL_ID_COL]]
+  # ── Shared inputs passed to both module instances ────────────────────────────
+  shared <- list(
+    n_wells      = reactive(input$n_wells),
+    year_range   = reactive(input$year_range),
+    resolution   = reactive(input$resolution),
+    show_labels  = reactive(input$show_labels),
+    show_rings   = reactive(input$show_rings),
+    dark_mode    = reactive(input$dark_mode),
+    show_cluster = reactive(input$show_cluster),
+    marker_every = reactive(input$marker_every),
+    show_legend  = reactive(FALSE),  # legend hidden by default
+    # Column name / CRS constants — plain values, not reactives
+    well_id_col  = WELL_ID_COL,
+    lon_col      = LON_COL,
+    lat_col      = LAT_COL,
+    date_col     = DATE_COL,
+    value_col    = VALUE_COL,
+    coords_crs    = COORDS_CRS,
+    geocode_cache    = .geocode_cache,
+    geocode_address  = geocode_address,
+    find_nearest     = find_nearest_wells,
+    query_ts         = query_timeseries
+  )
 
-    yr_from <- input$year_range[1]
-    yr_to   <- input$year_range[2]
-
-    # All filtering and resampling happens in DuckDB — nothing loaded into R
-    # beyond the rows actually needed for the plot.
-    # Filter by the internal well_id; the query JOINs metadata to return proj_id.
-    internal_ids <- nearest_meta()$well_id
-    ts <- query_timeseries(
-      gw_con,
-      well_ids   = internal_ids,
-      year_from  = yr_from,
-      year_to    = yr_to,
-      resolution = input$resolution
-    )
-
-    ts |>
-      dplyr::left_join(
-        nearest_meta() |>
-          dplyr::select(all_of(c(WELL_ID_COL, LON_COL, LAT_COL, "dist_km"))),
-        by = WELL_ID_COL
-      )
-  })
-
-  # ── Reactive: clustered time series (shared by plot + map) ──────────────────
-  # Runs cluster_bouquet() only when show_cluster is TRUE, otherwise returns
-  # the plain selected_ts(). Having this as a separate reactive avoids running
-  # the clustering twice (once for the plot, once for the map).
-  clustered_ts <- reactive({
-    req(selected_ts())
-    df <- selected_ts()
-    if (!isTRUE(input$show_cluster)) return(df)
-    bouquets::cluster_bouquet(
-      df,
-      time_col   = !!sym(DATE_COL),
-      series_col = !!sym(WELL_ID_COL),
-      value_col  = !!sym(VALUE_COL)
-    )
-  })
-
-  # ── Reactive: per-well cluster colour map ────────────────────────────────────
-  # Builds the bouquet plot once, extracts the actual colour assigned to each
-  # well_id from the rendered ggplot layers — guaranteed to match the plot.
-  cluster_colours <- reactive({
-    if (!isTRUE(input$show_cluster)) return(NULL)
-    req(clustered_ts())
-    df <- clustered_ts()
-    if (!"cluster" %in% names(df)) return(NULL)
-
-    dark <- isTRUE(input$dark_mode)
-
-    # Build the same plot the renderPlot will draw
-    p <- bouquets::make_plot_bouquet(
-      df,
-      time_col      = !!sym(DATE_COL),
-      series_col    = !!sym(WELL_ID_COL),
-      value_col     = !!sym(VALUE_COL),
-      stem_colors   = cluster,
-      flower_colors = cluster,
-      dark_mode     = dark,
-      verbose       = FALSE
-    )
-
-    # Convert S7 bouquet_plot → patchwork → extract first ggplot panel
-    pw <- patchwork::wrap_plots(p)
-    gg <- pw[[1L]]
-
-    # Build the ggplot to get resolved aesthetics per data point
-    built <- ggplot2::ggplot_build(gg)
-
-    # Find the first layer that has both 'colour' and the series column
-    # (bouquets draws path segments; colour is mapped to the series/cluster)
-    colour_df <- NULL
-    series_col_name <- WELL_ID_COL
-    for (ld in built$data) {
-      if ("colour" %in% names(ld) && nrow(ld) > 0) {
-        colour_df <- ld
-        break
-      }
-    }
-    if (is.null(colour_df)) return(NULL)
-
-    # The layout maps group integers to the original factor levels
-    # group in built$data corresponds to the order of unique series values
-    well_ids <- unique(df[[WELL_ID_COL]])
-
-    # Each well gets one group integer; extract one colour per group
-    grp_colours <- colour_df |>
-      dplyr::distinct(group, colour) |>
-      dplyr::arrange(group)
-
-    # Match group index to well_id by position (both ordered by appearance)
-    n_match <- min(nrow(grp_colours), length(well_ids))
-    tibble::tibble(
-      !!WELL_ID_COL := well_ids[seq_len(n_match)],
-      colour        = grp_colours$colour[seq_len(n_match)]
-    )
-  })
-  highlighted_well <- reactiveVal(NULL)
-
-  observeEvent(input$reset_highlight, {
-    highlighted_well(NULL)
-  })
-
-  # ── Reactive: plot title with address, date range and resolution ──────────────
-  # stringr::str_wrap() inserts newlines so long addresses never overflow the
-  # plot edge — ggplot2 naturally reflows the title across multiple lines.
-  plot_title <- reactive({
-    addr <- confirmed_address()
-    raw <- if (is.null(addr) || nchar(addr) == 0) {
-      sprintf('Groundwater level dynamics \u00b7 %d nearest wells', input$n_wells)
-    } else {
-      sprintf('Groundwater level dynamics \u00b7 %d nearest wells to "%s"',
-              input$n_wells, addr)
-    }
-    stringr::str_wrap(raw, width = 55)
-  })
+  # ── Instantiate location modules ─────────────────────────────────────────────
+  location_server("loc_a", gw_con, shared, meta_df)
+  location_server("loc_b", gw_con, shared, meta_df)
 
   # ── Render marker_every UI: slider or info text depending on resolution ───────
   output$marker_every_ui <- renderUI({
@@ -789,438 +635,8 @@ server <- function(input, output, session) {
     DBI::dbDisconnect(gw_con, shutdown = TRUE)
   })
 
-  # ── Download handler for static bouquet ──────────────────────────────────────
-  output$download_bouquet <- downloadHandler(
-    filename = function() {
-      sprintf("bouquet_%s_%dwells_%s_%d-%d.png",
-              gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
-              input$n_wells,
-              input$resolution,
-              input$year_range[1],
-              input$year_range[2])
-    },
-    content = function(file) {
-      req(selected_ts())
-      df  <- selected_ts()
-      hw  <- highlighted_well()
-      use_cluster <- isTRUE(input$show_cluster)
-
-      if (use_cluster) {
-        df <- bouquets::cluster_bouquet(
-          df,
-          time_col   = !!sym(DATE_COL),
-          series_col = !!sym(WELL_ID_COL),
-          value_col  = !!sym(VALUE_COL)
-        )
-      }
-
-      valid_markers <- c("year", "quarter", "month", "week", "day")
-      marker_arg <- if (input$marker_every == "off" || !input$marker_every %in% valid_markers) NULL else input$marker_every
-
-      p <- if (use_cluster) {
-        bouquets::make_plot_bouquet(
-          df,
-          time_col      = !!sym(DATE_COL),
-          series_col    = !!sym(WELL_ID_COL),
-          value_col     = !!sym(VALUE_COL),
-          stem_colors   = cluster,
-          flower_colors = cluster,
-          highlight     = hw,
-          show_labels   = isTRUE(input$show_labels),
-          label_color   = "#999999",
-          show_rings    = isTRUE(input$show_rings),
-          marker_every  = marker_arg,
-          dark_mode     = isTRUE(input$dark_mode),
-          title         = plot_title(),
-          verbose       = FALSE
-        )
-      } else {
-        bouquets::make_plot_bouquet(
-          df,
-          time_col      = !!sym(DATE_COL),
-          series_col    = !!sym(WELL_ID_COL),
-          value_col     = !!sym(VALUE_COL),
-          stem_colors   = "greens",
-          flower_colors = "blossom",
-          highlight     = hw,
-          show_labels   = isTRUE(input$show_labels),
-          label_color   = "#999999",
-          show_rings    = isTRUE(input$show_rings),
-          marker_every  = marker_arg,
-          dark_mode     = isTRUE(input$dark_mode),
-          title         = plot_title(),
-          verbose       = FALSE
-        )
-      }
-
-      # Extract the underlying ggplot from the bouquet S7 object and override
-      # plot.background so ggsave uses a single uniform colour with no layering.
-      bg_col <- if (isTRUE(input$dark_mode)) "#1a1a2e" else "#f8f8f5"
-      gg <- patchwork::wrap_plots(p)[[1L]] +
-        ggplot2::theme(
-          plot.background  = ggplot2::element_rect(fill = bg_col, colour = NA),
-          panel.background = ggplot2::element_rect(fill = bg_col, colour = NA)
-        )
-      ggplot2::ggsave(file, plot = gg, width = 12, height = 10, dpi = 300, bg = bg_col)
-    }
-  )
-
-  # ── Geocode status badge ─────────────────────────────────────────────────────
-  output$geocode_status_ui <- renderUI({
-    req(target_loc(), nearest_meta())
-    loc  <- target_loc()
-    meta <- nearest_meta()
-    tagList(
-      tags$hr(style = "margin: 6px 0"),
-      tags$small(
-        bsicons::bs_icon("check-circle-fill", class = "text-success"),
-        sprintf(
-          " %.4f°N, %.4f°E — %d wells loaded (max %.1f km)",
-          loc$lat, loc$lon, nrow(meta), max(meta$dist_km)
-        )
-      )
-    )
-  })
-
-  # ── Bouquet UI (switches between static and interactive) ────────────────────
-  output$bouquet_ui <- renderUI({
-    if (is.null(target_loc())) {
-      # Empty state — no address entered yet
-      div(
-        style = paste(
-          "height:100%; display:flex; flex-direction:column;",
-          "align-items:center; justify-content:center;",
-          "color:#aaa; border: 2px dashed #d8cfc0; border-radius:8px; margin:16px;"
-        ),
-        tags$span(style = "font-size:3rem;", "🌸"),
-        tags$p(style = "margin-top:12px; font-size:14px; text-align:center;",
-          "Enter a location in the sidebar", tags$br(),
-          "to explore nearby groundwater wells"
-        )
-      )
-    } else {
-      tagList(
-        # Spinner overlay while plot renders
-        div(id = "bouquet_spinner",
-          style = paste(
-            "position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);",
-            "z-index:10; display:none;"
-          ),
-          tags$div(class = "spinner-border text-secondary", role = "status")
-        ),
-        plotOutput("bouquet_static", height = "100%",
-                   click = "bouquet_static_click")
-      )
-    }
-  })
-
-  # ── Static bouquet ──────────────────────────────────────────────────────────
-  output$bouquet_static <- renderPlot({
-    req(clustered_ts())
-
-    # Dark mode background — must be set inside the render expression
-    bg_col <- if (isTRUE(input$dark_mode)) "#1a1a2e" else "white"
-    par(bg = bg_col)
-
-    # Use shared clustered_ts reactive — avoids running cluster_bouquet() twice
-    df          <- clustered_ts()
-    use_cluster <- isTRUE(input$show_cluster)
-
-    valid_markers <- c("year", "quarter", "month", "week", "day")
-    marker_arg <- if (input$marker_every == "off" || !input$marker_every %in% valid_markers) NULL else input$marker_every
-
-    # make_plot_bouquet() accepts either a keyword string (e.g. "greens") or
-    # a bare column symbol. We must use !! only when passing a sym(), and pass
-    # strings directly — mixing them up is what caused the "column not found" error.
-    hw <- highlighted_well()
-
-    p <- if (use_cluster) {
-      bouquets::make_plot_bouquet(
-        df,
-        time_col      = !!sym(DATE_COL),
-        series_col    = !!sym(WELL_ID_COL),
-        value_col     = !!sym(VALUE_COL),
-        stem_colors   = cluster,
-        flower_colors = cluster,
-        highlight     = hw,
-        show_labels   = isTRUE(input$show_labels),
-        label_color   = "#999999",
-        show_rings    = isTRUE(input$show_rings),
-        marker_every  = marker_arg,
-        dark_mode     = isTRUE(input$dark_mode),
-        title         = plot_title(),
-        verbose       = FALSE
-      )
-    } else {
-        bouquets::make_plot_bouquet(
-          df,
-          time_col      = !!sym(DATE_COL),
-          series_col    = !!sym(WELL_ID_COL),
-          value_col     = !!sym(VALUE_COL),
-          stem_colors   = "greens",
-          flower_colors = "blossom",
-          highlight     = hw,
-          show_labels   = isTRUE(input$show_labels),
-          label_color   = "#999999",
-          show_rings    = isTRUE(input$show_rings),
-          marker_every  = marker_arg,
-          dark_mode     = isTRUE(input$dark_mode),
-          title         = plot_title(),
-          verbose       = FALSE
-        )
-    }
-
-    # Apply legend: convert to patchwork first so & operator works
-    if (!isTRUE(input$show_legend)) {
-      p <- patchwork::wrap_plots(p) & ggplot2::theme(legend.position = "none")
-    }
-    p
-  })
-
-  # ── Leaflet map — default Germany view with all wells in grey ───────────────
-  output$well_map <- leaflet::renderLeaflet({
-    # Reproject all wells to WGS84 once at startup
-    all_wgs84_init <- meta_df |>
-      sf::st_as_sf(coords = c(LON_COL, LAT_COL), crs = COORDS_CRS) |>
-      sf::st_transform(crs = 4326) |>
-      sf::st_coordinates() |>
-      as.data.frame() |>
-      dplyr::rename(lon_wgs84 = X, lat_wgs84 = Y)
-
-    leaflet::leaflet() |>
-      leaflet::addProviderTiles(leaflet::providers$CartoDB.Positron) |>
-      leaflet::addCircleMarkers(
-        lng         = all_wgs84_init$lon_wgs84,
-        lat         = all_wgs84_init$lat_wgs84,
-        group       = "all_wells",
-        radius      = 3,
-        color       = "#888888",
-        fillColor   = "#888888",
-        fillOpacity = 0.3,
-        weight      = 0,
-        opacity     = 0.4
-      ) |>
-      leaflet::setView(lng = 10.5, lat = 51.2, zoom = 6)
-  })
-
-  # ── Update map with wells when data is ready ─────────────────────────────────
-  observe({
-    req(nearest_meta(), target_loc())
-    meta <- nearest_meta()
-    loc  <- target_loc()
-
-    # Reproject all wells to WGS84 for the grey background layer
-    all_wgs84 <- meta_df |>
-      sf::st_as_sf(coords = c(LON_COL, LAT_COL), crs = COORDS_CRS) |>
-      sf::st_transform(crs = 4326) |>
-      sf::st_coordinates() |>
-      as.data.frame() |>
-      dplyr::rename(lon_wgs84 = X, lat_wgs84 = Y) |>
-      dplyr::mutate(well_id = meta_df[[WELL_ID_COL]])
-
-    # Mark which wells are selected (nearest n)
-    selected_ids <- meta[[WELL_ID_COL]]
-    all_wgs84$selected <- all_wgs84$well_id %in% selected_ids
-
-    dist_pal <- leaflet::colorNumeric(
-      palette = "YlOrRd",
-      domain  = meta$dist_km,
-      reverse = FALSE
-    )
-
-    # ── Cluster colours (if enabled) ─────────────────────────────────────────
-    use_cluster <- isTRUE(input$show_cluster)
-    clust_map   <- cluster_colours()   # NULL when show_cluster is FALSE
-
-    # Build a plain character vector of hex colours, one per well in meta order.
-    # Using a named lookup avoids any join/formula NA issues in leaflet.
-    well_colours <- if (use_cluster && !is.null(clust_map) && nrow(clust_map) > 0) {
-      colour_lookup <- setNames(clust_map$colour, clust_map[[WELL_ID_COL]])
-      cols <- colour_lookup[meta[[WELL_ID_COL]]]
-      unmatched <- is.na(cols)
-      if (any(unmatched)) cols[unmatched] <- dist_pal(meta$dist_km[unmatched])
-      unname(cols)
-    } else {
-      dist_pal(meta$dist_km)
-    }
-
-    # ── Build per-well popup HTML before the pipe chain ──────────────────────
-    # sapply returns a plain character vector; leaflet's popup arg requires that.
-    popup_html <- sapply(seq_len(nrow(meta)), function(i) {
-      paste0(
-        "<b>", meta[[WELL_ID_COL]][i], "</b>",
-        "<hr style='margin:4px 0'>",
-        "<table style='font-size:12px;line-height:1.6'>",
-        "<tr><td style='color:#666;padding-right:8px'>Distance</td>",
-            "<td><b>", meta$dist_km[i], " km</b></td></tr>",
-        "<tr><td style='color:#666'>Depth</td>",
-            "<td>", meta$depth[i], " m</td></tr>",
-        "<tr><td style='color:#666'>Upper filter</td>",
-            "<td>", meta$up_filter[i], " m</td></tr>",
-        "<tr><td style='color:#666'>Lower filter</td>",
-            "<td>", meta$lo_filter[i], " m</td></tr>",
-        "<tr><td style='color:#666'>Screen length</td>",
-            "<td>", meta$scr_length[i], " m</td></tr>",
-        "<tr><td style='color:#666'>Aquifer medium</td>",
-            "<td>", meta$aquifer_med[i], "</td></tr>",
-        "<tr><td style='color:#666'>State</td>",
-            "<td>", meta$pre_state[i], "</td></tr>",
-        "</table>"
-      )
-    })
-
-    # ── Use leafletProxy to update the existing base map ─────────────────────
-    proxy <- leaflet::leafletProxy("well_map") |>
-      leaflet::clearGroup("all_wells") |>
-      leaflet::clearGroup("wells") |>
-      leaflet::clearGroup("lines") |>
-      leaflet::clearGroup("target") |>
-      leaflet::clearControls() |>
-
-      # ── All wells (grey background) ──────────────────────────────────────────
-      leaflet::addCircleMarkers(
-        data        = dplyr::filter(all_wgs84, !selected),
-        lng         = ~lon_wgs84,
-        lat         = ~lat_wgs84,
-        group       = "all_wells",
-        radius      = 5,
-        color       = "#888888",
-        fillColor   = "#888888",
-        fillOpacity = 0.35,
-        weight      = 1,
-        opacity     = 0.5
-      ) |>
-
-      # ── Target location pin ───────────────────────────────────────────────────
-      leaflet::addAwesomeMarkers(
-        lng   = loc$lon,
-        lat   = loc$lat,
-        icon  = leaflet::awesomeIcons(
-          icon        = "home",
-          library     = "fa",
-          markerColor = "blue",
-          iconColor   = "white"
-        ),
-        label = htmltools::HTML(paste0("<b>📍 ", confirmed_address(), "</b>")),
-        group = "target"
-      ) |>
-
-      # ── Selected n wells (coloured) ──────────────────────────────────────────
-      leaflet::addCircleMarkers(
-        data        = meta,
-        lng         = ~lon_wgs84,
-        lat         = ~lat_wgs84,
-        group       = "wells",
-        layerId     = ~get(WELL_ID_COL),
-        color       = well_colours,
-        fillColor   = well_colours,
-        fillOpacity = 0.85,
-        radius      = 9,
-        weight      = 1.5,
-        label        = if (isTRUE(input$show_labels)) ~as.character(get(WELL_ID_COL)) else NULL,
-        labelOptions = leaflet::labelOptions(
-          permanent  = TRUE,
-          direction  = "right",
-          offset     = c(10, 0),
-          textOnly   = TRUE,
-          style      = list(
-            "font-size"   = "10px",
-            "font-weight" = "600",
-            "color"       = "#999999",
-            "text-shadow" = "0 0 3px #ffffff, 0 0 3px #ffffff"
-          )
-        ),
-        popup = popup_html
-      ) |>
-      leaflet::addLayersControl(
-        overlayGroups = c("all_wells", "wells", "lines", "target"),
-        options       = leaflet::layersControlOptions(collapsed = TRUE, autoZIndex = TRUE)
-      ) |>
-      htmlwidgets::onRender("
-        function(el, x) {
-          // Remove the title attribute from the layers toggle button so no
-          // browser tooltip appears when hovering over the layers control.
-          var toggle = el.querySelector('.leaflet-control-layers-toggle');
-          if (toggle) toggle.removeAttribute('title');
-        }
-      ") |>
-      leaflet::fitBounds(
-        lng1 = min(c(meta$lon_wgs84, loc$lon)) - 0.1,
-        lat1 = min(c(meta$lat_wgs84, loc$lat)) - 0.1,
-        lng2 = max(c(meta$lon_wgs84, loc$lon)) + 0.1,
-        lat2 = max(c(meta$lat_wgs84, loc$lat)) + 0.1
-      )
-
-    # ── Distance lines ────────────────────────────────────────────────────────
-    proxy <- Reduce(
-      f = function(map, i) {
-        leaflet::addPolylines(
-          map,
-          lng     = c(loc$lon, meta$lon_wgs84[i]),
-          lat     = c(loc$lat, meta$lat_wgs84[i]),
-          color   = well_colours[i],
-          weight  = 1,
-          opacity = 0.4,
-          group   = "lines"
-        )
-      },
-      x    = seq_len(nrow(meta)),
-      init = proxy
-    )
-
-    # Add distance legend only when not in cluster mode
-    if (!use_cluster || is.null(clust_map)) {
-      proxy |>
-        leaflet::addLegend(
-          position  = "bottomright",
-          pal       = dist_pal,
-          values    = meta$dist_km,
-          title     = "Distance (km)",
-          opacity   = 0.9,
-          labFormat = leaflet::labelFormat(suffix = " km")
-        )
-    }
-  })
-
-  # ── Map background click → clear highlight ───────────────────────────────────
-  # Fires when the user clicks anywhere on the map that is NOT a marker.
-  # This is the "deselect" gesture — double-click also works naturally because
-  # it fires two click events, the second of which lands on the background.
-  observeEvent(input$well_map_click, {
-    highlighted_well(NULL)
-    leaflet::leafletProxy("well_map") |>
-      leaflet::clearGroup("highlight")
-  })
-
-  # ── Map click → highlight bouquet trace ─────────────────────────────────────
-  observeEvent(input$well_map_marker_click, {
-    click <- input$well_map_marker_click
-    req(click$id)  # layerId = well_id set above
-
-    well_id <- click$id
-    highlighted_well(well_id)
-
-    # Pulse the clicked marker — guard against clicks on unlabelled grey markers
-    meta <- nearest_meta()
-    row  <- meta[meta[[WELL_ID_COL]] == well_id, ]
-    req(nrow(row) > 0)
-
-    leaflet::leafletProxy("well_map") |>
-      leaflet::clearGroup("highlight") |>
-      leaflet::addCircleMarkers(
-        lng         = row$lon_wgs84,
-        lat         = row$lat_wgs84,
-        group       = "highlight",
-        radius      = 17,
-        color       = "#e74c3c",
-        fill        = FALSE,
-        weight      = 3,
-        opacity     = 1,
-        options     = leaflet::markerOptions(interactive = FALSE)
-      )
-  })
 
 }  # /server
 
-
 shinyApp(ui, server)
+
