@@ -29,6 +29,7 @@ library(shinyWidgets)
 library(shinyjs)
 library(hues)
 library(bouquets)
+library(promises)
 
 source("location_module.R")
 

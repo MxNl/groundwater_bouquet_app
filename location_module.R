@@ -175,53 +175,50 @@ location_server <- function(id, gw_con, shared, meta_df) {
 
     # ── Geocode on button click ───────────────────────────────────────────
     observeEvent(input$geocode_btn, {
-      query <- trimws(input$address)
-      req(nchar(query) > 0)
+  query <- trimws(input$address)
+  req(nchar(query) > 0)
 
-      shinyjs::html(
-        ns("geocode_btn"),
-        '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching…'
-      )
-      shinyjs::disable(ns("geocode_btn"))
-      on.exit({
-        shinyjs::html(
-          ns("geocode_btn"),
-          '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells'
-        )
-        shinyjs::enable(ns("geocode_btn"))
+  # Show spinner — these messages are queued but the browser won't paint
+  # them until R yields. shinyjs::delay() defers the blocking geocode call
+  # by one JS tick so the browser can render the spinner first.
+  shinyjs::html(ns("geocode_btn"), '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching\u2026')
+  shinyjs::disable(ns("geocode_btn"))
+
+  shinyjs::delay(50, {
+    cache_key <- tolower(query)
+    geocode_cache <- shared$geocode_cache
+
+    if (exists(cache_key, envir = geocode_cache)) {
+      loc <- geocode_cache[[cache_key]]
+    } else {
+      tryCatch({
+        loc <- shared$geocode_address(query)
+        if (!is.na(loc$lat) && !is.na(loc$lon)) {
+          assign(cache_key, loc, envir = geocode_cache)
+        }
+      }, error = function(e) {
+        showNotification(paste("Geocoding error:", conditionMessage(e)),
+                         type = "error", duration = 8)
+        loc <<- list(lat = NA, lon = NA)
       })
+    }
 
-      cache_key <- tolower(query)
-      geocode_cache <- shared$geocode_cache
-      if (exists(cache_key, envir = geocode_cache)) {
-        loc <- geocode_cache[[cache_key]]
-      } else {
-        tryCatch({
-          loc <- shared$geocode_address(query)
-          if (!is.na(loc$lat) && !is.na(loc$lon)) {
-            assign(cache_key, loc, envir = geocode_cache)
-          }
-        }, error = function(e) {
-          showNotification(
-            paste("Geocoding error:", conditionMessage(e)),
-            type = "error", duration = 8
-          )
-          loc <<- list(lat = NA, lon = NA)
-        })
-      }
+    if (is.na(loc$lat) || is.na(loc$lon)) {
+      showNotification("Address not found. Try a more specific query or a different spelling.",
+                       type = "warning", duration = 6)
+      target_loc(NULL)
+      confirmed_address(NULL)
+    } else {
+      target_loc(loc)
+      confirmed_address(query)
+    }
 
-      if (is.na(loc$lat) || is.na(loc$lon)) {
-        showNotification(
-          "Address not found. Try a more specific query or a different spelling.",
-          type = "warning", duration = 6
-        )
-        target_loc(NULL)
-        confirmed_address(NULL)
-      } else {
-        target_loc(loc)
-        confirmed_address(query)
-      }
-    })
+    # Restore button after geocoding completes
+    shinyjs::html(ns("geocode_btn"),
+      '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells')
+    shinyjs::enable(ns("geocode_btn"))
+  })
+})
 
     # ── Nearest wells ─────────────────────────────────────────────────────
     nearest_meta <- reactive({
