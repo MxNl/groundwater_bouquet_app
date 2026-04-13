@@ -76,4 +76,4 @@ data_gems_pre <-
   select(id, date, gwl)
   tidyr::pivot_wider(names_from = "id", values_from = "gwl")
 
-
+bouquets::make_plot_bouquet()

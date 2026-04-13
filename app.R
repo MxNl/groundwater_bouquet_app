@@ -117,15 +117,41 @@ rm(.range_con, .yr)
 
 
 # ── Helper: query + resample time series entirely in DuckDB ──────────────────
-# resolution: "week" | "month" | "quarter" | "year"  (used as DATE_TRUNC unit)
+# resolution:    "week" | "month" | "quarter" | "year"  (used as DATE_TRUNC unit)
 # year_from / year_to: integer years, inclusive
+# annual_mean:   logical — if TRUE, ignore year_from/year_to and return one
+#                row per ISO-week number per well, averaged over all years.
+#                Dates are anchored to a fixed reference year (2000) so that
+#                the bouquet receives proper Date objects at weekly spacing.
 query_timeseries <- function(con, well_ids,
-                             year_from  = NULL,
-                             year_to    = NULL,
-                             resolution = "week") {
+                             year_from   = NULL,
+                             year_to     = NULL,
+                             resolution  = "week",
+                             annual_mean = FALSE) {
 
   ids_sql <- paste0("'", well_ids, "'", collapse = ", ")
 
+  if (annual_mean) {
+    # Average GWL per ISO week number across ALL years in the database.
+    # We reconstruct a real Date by using ISO year 2000 as the anchor:
+    #   DATE '2000-01-03' is the Monday of ISO week 1 of 2000, so adding
+    #   (iso_week - 1) * 7 days gives the Monday of that week in year 2000.
+    # This produces exactly 52 (or 53) rows per well at weekly spacing.
+    query <- sprintf(
+      "SELECT m.proj_id AS proj_id,
+              CAST('2000-01-03'::DATE + INTERVAL (ISODOW(MIN(t.date)) - 1 + (EXTRACT(WEEK FROM t.date)::INTEGER - 1) * 7) DAY AS DATE) AS date,
+              AVG(t.gwl) AS gwl
+         FROM timeseries t
+         JOIN metadata   m ON m.well_id = t.well_id
+        WHERE t.well_id IN (%s)
+        GROUP BY m.proj_id, EXTRACT(WEEK FROM t.date)::INTEGER
+        ORDER BY m.proj_id, EXTRACT(WEEK FROM t.date)::INTEGER",
+      ids_sql
+    )
+    return(DBI::dbGetQuery(con, query))
+  }
+
+  # ── Standard (non-annual-mean) path ──────────────────────────────────────
   # Date filter clause
   date_filter <- ""
   if (!is.null(year_from))
@@ -243,6 +269,20 @@ ui <- bslib::page_navbar(
       #loc_b_panels_row .bslib-grid {
         height: 100%;
       }
+      /* Compact the accordion that lives inside the sidebar */
+      .bslib-sidebar-layout .accordion {
+        margin-top: 4px;
+      }
+      .bslib-sidebar-layout .accordion-button {
+        padding-top: 7px;
+        padding-bottom: 7px;
+        font-size: 0.875rem;
+        font-weight: 600;
+      }
+      .bslib-sidebar-layout .accordion-body {
+        padding-top: 8px;
+        padding-bottom: 4px;
+      }
     ")),
     # Intro modal — shown on first load
     tags$script(HTML("
@@ -307,39 +347,61 @@ ui <- bslib::page_navbar(
           )
         ),
 
-        # — Settings —
-        bslib::card(
-          bslib::card_header(
-            bsicons::bs_icon("sliders"), " Settings"
-          ),
-          sliderInput(
-            "n_wells", "Number of nearest wells",
-            min = 2, max = 50, value = 15, step = 1
-          ),
-          sliderInput(
-            "year_range", "Time period",
-            min   = DB_YEAR_MIN, max = DB_YEAR_MAX,
-            value = c(DB_YEAR_MIN, DB_YEAR_MAX),
-            step  = 1, sep = ""
-          ),
-          shinyWidgets::sliderTextInput(
-            "resolution", "Temporal resolution",
-            choices  = c("week", "month", "quarter", "year"),
-            selected = "week",
-            grid     = TRUE
-          )
-        ),
+        # — Settings & Plot Options (collapsible) —
+        bslib::accordion(
+          id            = "sidebar_accordion",
+          open          = FALSE,   # all panels collapsed by default
+          multiple      = TRUE,
 
-        # — Plot options —
-        bslib::card(
-          bslib::card_header(
-            bsicons::bs_icon("palette"), " Plot options"
+          # ── Settings panel ──────────────────────────────────────────────
+          bslib::accordion_panel(
+            title = tagList(bsicons::bs_icon("sliders"), " Settings"),
+            value = "settings_panel",
+
+            sliderInput(
+              "n_wells", "Number of nearest wells",
+              min = 2, max = 50, value = 15, step = 1
+            ),
+
+            # ── Mode selector ──────────────────────────────────────────────
+            tags$div(
+              style = "margin-bottom: 10px;",
+              tags$label(
+                "Visualisation mode",
+                class = "control-label",
+                style = "font-weight:600; font-size:0.875rem; display:block; margin-bottom:6px;"
+              ),
+              shinyWidgets::radioGroupButtons(
+                inputId   = "annual_mean",
+                label     = NULL,
+                choices   = c(
+                  `<span title='Show the full recorded time series for each well'>&#x1F4C8; Time series</span>` = "timeseries",
+                  `<span title='Average each calendar week across all years to show the typical annual cycle'>&#x1F4C5; Annual cycle</span>` = "annual_mean"
+                ),
+                selected  = "timeseries",
+                justified = TRUE,
+                size      = "sm",
+                status    = "primary"
+              ),
+              # Description box — updates based on selection
+              uiOutput("mode_description_ui")
+            ),
+
+            uiOutput("year_range_ui"),
+            uiOutput("resolution_ui")
           ),
-          uiOutput("marker_every_ui"),
-          checkboxInput("show_labels",  "Show well labels",  value = FALSE),
-          checkboxInput("show_rings",   "Show rings",        value = FALSE),
-          checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
-          checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
+
+          # ── Plot options panel ───────────────────────────────────────────
+          bslib::accordion_panel(
+            title = tagList(bsicons::bs_icon("palette"), " Plot options"),
+            value = "plot_options_panel",
+
+            uiOutput("marker_every_ui"),
+            checkboxInput("show_labels",  "Show well labels",  value = FALSE),
+            checkboxInput("show_rings",   "Show rings",        value = FALSE),
+            checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
+            checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
+          )
         )
       ),  # /sidebar
 
@@ -581,6 +643,7 @@ server <- function(input, output, session) {
     n_wells      = reactive(input$n_wells),
     year_range   = reactive(input$year_range),
     resolution   = reactive(input$resolution),
+    annual_mean  = reactive(identical(input$annual_mean, "annual_mean")),
     show_labels  = reactive(input$show_labels),
     show_rings   = reactive(input$show_rings),
     dark_mode    = reactive(input$dark_mode),
@@ -604,34 +667,130 @@ server <- function(input, output, session) {
   location_server("loc_a", gw_con, shared, meta_df)
   location_server("loc_b", gw_con, shared, meta_df)
 
+  # ── Mode description box ────────────────────────────────────────────────────
+  output$mode_description_ui <- renderUI({
+    am <- identical(input$annual_mean, "annual_mean")
+    if (am) {
+      tags$div(
+        style = paste(
+          "font-size:11px; color:#555; background:#eef4fb;",
+          "border-left:3px solid #2C7BB6; padding:6px 8px;",
+          "border-radius:3px; margin-top:6px;"
+        ),
+        bsicons::bs_icon("calendar-week"),
+        tags$b(" Annual cycle mode: "),
+        "Each ISO week is averaged across all years in the database,",
+        " revealing the typical intra-year pattern independent of long-term trends.",
+        tags$br(),
+        tags$span(
+          style = "color:#888;",
+          bsicons::bs_icon("lock-fill"),
+          " Time period and resolution controls are disabled."
+        )
+      )
+    } else {
+      tags$div(
+        style = paste(
+          "font-size:11px; color:#555; background:#f0faf2;",
+          "border-left:3px solid #27ae60; padding:6px 8px;",
+          "border-radius:3px; margin-top:6px;"
+        ),
+        bsicons::bs_icon("graph-up"),
+        tags$b(" Time series mode: "),
+        "Shows the full recorded time series for each well within the selected period.",
+        " Use the sliders below to adjust the time window and temporal resolution."
+      )
+    }
+  })
+
+  # ── Year-range UI: disabled (greyed) when annual_mean is active ─────────────
+  output$year_range_ui <- renderUI({
+    am <- identical(input$annual_mean, "annual_mean")
+    tagList(
+      tags$div(
+        style = if (am) "opacity:0.4; pointer-events:none;" else "",
+        sliderInput(
+          "year_range", "Time period",
+          min   = DB_YEAR_MIN, max = DB_YEAR_MAX,
+          value = c(DB_YEAR_MIN, DB_YEAR_MAX),
+          step  = 1, sep = ""
+        )
+      ),
+      if (am) tags$p(
+        style = "font-size:11px; color:#888; margin:-10px 0 4px 0;",
+        bsicons::bs_icon("lock-fill"), " Disabled in annual mean mode."
+      )
+    )
+  })
+
+  # ── Resolution UI: locked to "week" when annual_mean is active ───────────────
+  output$resolution_ui <- renderUI({
+    am <- identical(input$annual_mean, "annual_mean")
+    tagList(
+      tags$div(
+        style = if (am) "opacity:0.4; pointer-events:none;" else "",
+        shinyWidgets::sliderTextInput(
+          "resolution", "Temporal resolution",
+          choices  = c("week", "month", "quarter", "year"),
+          selected = if (am) "week" else isolate({
+            cur <- input$resolution
+            if (!is.null(cur)) cur else "week"
+          }),
+          grid     = TRUE
+        )
+      ),
+      if (am) tags$p(
+        style = "font-size:11px; color:#888; margin:-10px 0 4px 0;",
+        bsicons::bs_icon("lock-fill"), " Locked to week in annual mean mode."
+      )
+    )
+  })
+
   # ── Render marker_every UI: slider or info text depending on resolution ───────
   output$marker_every_ui <- renderUI({
-    RESOLUTION_ORDER <- c("year", "quarter", "month", "week", "day")
-    res_idx <- match(input$resolution, RESOLUTION_ORDER)
-    valid   <- if (res_idx > 1L) RESOLUTION_ORDER[seq_len(res_idx - 1L)] else character(0)
-
-    if (length(valid) == 0L) {
+    am <- identical(input$annual_mean, "annual_mean")
+    if (am) {
       tagList(
         tags$label("Time step markers",
                    class = "control-label",
                    style = "font-weight:600; font-size:0.875rem;"),
         tags$p(
           style = "font-size:11px; color:#888; margin:2px 0 6px 0;",
-          "Not available at yearly resolution."
+          bsicons::bs_icon("lock-fill"),
+          " Not available in annual mean mode."
         )
       )
     } else {
-      choices <- c("off", valid)
-      current <- isolate(input$marker_every)
-      sel     <- if (!is.null(current) && current %in% choices) current else "off"
-      shinyWidgets::sliderTextInput(
-        "marker_every", "Time step markers",
-        choices  = choices,
-        selected = sel,
-        grid     = FALSE
-      )
+      RESOLUTION_ORDER <- c("year", "quarter", "month", "week", "day")
+      res_idx <- match(input$resolution, RESOLUTION_ORDER)
+      valid   <- if (length(res_idx) == 1L && !is.na(res_idx) && res_idx > 1L)
+                   RESOLUTION_ORDER[seq_len(res_idx - 1L)]
+                 else character(0)
+
+      if (length(valid) == 0L) {
+        tagList(
+          tags$label("Time step markers",
+                     class = "control-label",
+                     style = "font-weight:600; font-size:0.875rem;"),
+          tags$p(
+            style = "font-size:11px; color:#888; margin:2px 0 6px 0;",
+            "Not available at yearly resolution."
+          )
+        )
+      } else {
+        choices <- c("off", valid)
+        current <- isolate(input$marker_every)
+        sel     <- if (!is.null(current) && current %in% choices) current else "off"
+        shinyWidgets::sliderTextInput(
+          "marker_every", "Time step markers",
+          choices  = choices,
+          selected = sel,
+          grid     = FALSE
+        )
+      }
     }
   })
+
   onStop(function() {
     DBI::dbDisconnect(gw_con, shutdown = TRUE)
   })

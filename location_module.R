@@ -94,6 +94,10 @@ location_panels_ui <- function(id) {
     !inputs$marker_every %in% valid_markers
   ) NULL else inputs$marker_every
 
+  # Use a tighter ceiling_pct in annual mean mode so the condensed
+  # seasonal cycle fills the plot area better (52 steps vs 1000+ steps).
+  ceiling_pct_val <- if (isTRUE(inputs$annual_mean)) 0.7 else 0.9
+
   if (use_cluster) {
     bouquets::make_plot_bouquet(
       df,
@@ -108,13 +112,14 @@ location_panels_ui <- function(id) {
       show_rings    = isTRUE(inputs$show_rings),
       marker_every  = marker_arg,
       dark_mode     = isTRUE(inputs$dark_mode),
+      ceiling_pct   = ceiling_pct_val,
       title         = inputs$plot_title,
       verbose       = FALSE
     )
   } else {
     bouquets::make_plot_bouquet(
       df,
-      time_col      = !!rlang::sym(DATE_COL),    # local alias from inputs
+      time_col      = !!rlang::sym(DATE_COL),
       series_col    = !!rlang::sym(WELL_ID_COL),
       value_col     = !!rlang::sym(VALUE_COL),
       stem_colors   = "greens",
@@ -125,6 +130,7 @@ location_panels_ui <- function(id) {
       show_rings    = isTRUE(inputs$show_rings),
       marker_every  = marker_arg,
       dark_mode     = isTRUE(inputs$dark_mode),
+      ceiling_pct   = ceiling_pct_val,
       title         = inputs$plot_title,
       verbose       = FALSE
     )
@@ -234,14 +240,16 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── Time series ───────────────────────────────────────────────────────
     selected_ts <- reactive({
       req(nearest_meta())
-      yr  <- shared$year_range()
+      yr          <- shared$year_range()
+      am          <- isTRUE(shared$annual_mean())
       internal_ids <- nearest_meta()$well_id
       ts <- shared$query_ts(
         gw_con,
-        well_ids   = internal_ids,
-        year_from  = yr[1],
-        year_to    = yr[2],
-        resolution = shared$resolution()
+        well_ids    = internal_ids,
+        year_from   = if (am) NULL else yr[1],
+        year_to     = if (am) NULL else yr[2],
+        resolution  = if (am) "week" else shared$resolution(),
+        annual_mean = am
       )
       ts |>
         dplyr::left_join(
@@ -324,12 +332,13 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── Plot title ────────────────────────────────────────────────────────
     plot_title <- reactive({
       addr <- confirmed_address()
+      am   <- isTRUE(shared$annual_mean())
+      mode_label <- if (am) "Annual mean dynamics" else "Groundwater level dynamics"
       raw <- if (is.null(addr) || nchar(addr) == 0) {
-        sprintf('Groundwater level dynamics \u00b7 %d nearest wells',
-                shared$n_wells())
+        sprintf('%s · %d nearest wells', mode_label, shared$n_wells())
       } else {
-        sprintf('Groundwater level dynamics \u00b7 %d nearest wells to "%s"',
-                shared$n_wells(), addr)
+        sprintf('%s · %d nearest wells to "%s"',
+                mode_label, shared$n_wells(), addr)
       }
       stringr::str_wrap(raw, width = 55)
     })
@@ -395,6 +404,7 @@ location_server <- function(id, gw_con, shared, meta_df) {
         show_labels   = shared$show_labels(),
         show_rings    = shared$show_rings(),
         dark_mode     = shared$dark_mode(),
+        annual_mean   = shared$annual_mean(),
         plot_title    = plot_title(),
         well_id_col   = WELL_ID_COL,
         date_col      = DATE_COL,
@@ -412,12 +422,19 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── Download handler ─────────────────────────────────────────────────
     output$download_bouquet <- downloadHandler(
       filename = function() {
-        sprintf("bouquet_%s_%dwells_%s_%d-%d.png",
-                gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
-                shared$n_wells(),
-                shared$resolution(),
-                shared$year_range()[1],
-                shared$year_range()[2])
+        am <- isTRUE(shared$annual_mean())
+        if (am) {
+          sprintf("bouquet_%s_%dwells_annual_mean.png",
+                  gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
+                  shared$n_wells())
+        } else {
+          sprintf("bouquet_%s_%dwells_%s_%d-%d.png",
+                  gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
+                  shared$n_wells(),
+                  shared$resolution(),
+                  shared$year_range()[1],
+                  shared$year_range()[2])
+        }
       },
       content = function(file) {
         req(selected_ts())
@@ -439,6 +456,7 @@ location_server <- function(id, gw_con, shared, meta_df) {
           show_labels   = shared$show_labels(),
           show_rings    = shared$show_rings(),
           dark_mode     = shared$dark_mode(),
+          annual_mean   = shared$annual_mean(),
           plot_title    = plot_title(),
           well_id_col   = WELL_ID_COL,
           date_col      = DATE_COL,
