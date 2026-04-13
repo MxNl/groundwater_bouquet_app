@@ -131,6 +131,10 @@ query_timeseries <- function(con, well_ids,
 
   ids_sql <- paste0("'", well_ids, "'", collapse = ", ")
 
+  # Defensive null-guard: resolution can be NULL during app startup when the
+  # accordion panel containing the sliderTextInput has not yet initialised.
+  if (is.null(resolution) || !nzchar(resolution)) resolution <- "week"
+
   if (annual_mean) {
     # Average GWL per ISO week number across ALL years in the database.
     # We reconstruct a real Date by using ISO year 2000 as the anchor:
@@ -790,6 +794,13 @@ server <- function(input, output, session) {
       }
     }
   })
+
+  # ── Pre-render hidden accordion outputs so their inputs initialise at
+  # startup rather than on first open, preventing a spurious plot re-render
+  # when the user opens the accordion for the first time.
+  outputOptions(output, "year_range_ui",   suspendWhenHidden = FALSE)
+  outputOptions(output, "resolution_ui",   suspendWhenHidden = FALSE)
+  outputOptions(output, "marker_every_ui", suspendWhenHidden = FALSE)
 
   onStop(function() {
     DBI::dbDisconnect(gw_con, shutdown = TRUE)

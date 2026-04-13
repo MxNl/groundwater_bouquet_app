@@ -37,11 +37,18 @@ location_ui <- function(id, label = "Location") {
 location_panels_ui <- function(id) {
   ns <- NS(id)
   tagList(
-    # Bouquet plot card
+    # Bouquet plot card.
+    # plotOutput lives directly in the static UI (not inside uiOutput) so
+    # that height:100% always has a resolved parent height.  The empty-state
+    # placeholder and the plot wrapper are toggled with shinyjs::show/hide
+    # from the server; Shiny suspends renderPlot automatically while the
+    # wrapper is hidden, preventing the "figure margins too large" error.
     bslib::card(
+      id          = ns("bouquet_card"),
       full_screen = TRUE,
-      style       = "background-color: #f5f0e8;",
+      style       = "background-color: #f5f0e8; min-height: 480px;",
       bslib::card_header(
+        id    = ns("bouquet_card_header"),
         style = "background-color: #ede8de;",
         bsicons::bs_icon("flower1"), " Bouquet Plot",
         div(
@@ -54,9 +61,37 @@ location_panels_ui <- function(id) {
         )
       ),
       bslib::card_body(
+        id      = ns("bouquet_card_body"),
         padding = 0,
-        style   = "background-color: #f5f0e8;",
-        uiOutput(ns("bouquet_ui"))
+        style   = "background-color: #f5f0e8; display:flex; flex-direction:column; overflow:hidden;",
+        # Empty state — shown until a location is confirmed
+        div(
+          id    = ns("bouquet_empty"),
+          style = paste(
+            "flex:1; display:flex; flex-direction:column;",
+            "align-items:center; justify-content:center;",
+            "color:#aaa; border:2px dashed #d8cfc0;",
+            "border-radius:8px; margin:16px;"
+          ),
+          tags$span(style = "font-size:3rem;", "\U0001F338"),
+          tags$p(
+            style = "margin-top:12px; font-size:14px; text-align:center;",
+            "Enter a location in the sidebar", tags$br(),
+            "to explore nearby groundwater wells"
+          )
+        ),
+        # Plot wrapper — always in DOM so plotOutput height:100% resolves;
+        # hidden initially and revealed once data is ready
+        shinyjs::hidden(
+          div(
+            id    = ns("bouquet_plot_wrap"),
+            style = "flex:1; min-height:0; position:relative;",
+            plotOutput(
+              ns("bouquet_static"), height = "100%",
+              click = ns("bouquet_static_click")
+            )
+          )
+        )
       )
     ),
 
@@ -243,12 +278,17 @@ location_server <- function(id, gw_con, shared, meta_df) {
       yr          <- shared$year_range()
       am          <- isTRUE(shared$annual_mean())
       internal_ids <- nearest_meta()$well_id
+      # Guard against NULL resolution (can occur before the accordion panel
+      # containing the sliderTextInput has initialised its value on first load).
+      res <- shared$resolution()
+      if (is.null(res) || !nzchar(res)) res <- "week"
+
       ts <- shared$query_ts(
         gw_con,
         well_ids    = internal_ids,
         year_from   = if (am) NULL else yr[1],
         year_to     = if (am) NULL else yr[2],
-        resolution  = if (am) "week" else shared$resolution(),
+        resolution  = if (am) "week" else res,
         annual_mean = am
       )
       ts |>
@@ -343,6 +383,56 @@ location_server <- function(id, gw_con, shared, meta_df) {
       stringr::str_wrap(raw, width = 55)
     })
 
+    # ── Sync card background colours with dark-mode toggle ────────────────
+    # Keeps the card header/body CSS in step with the ggplot plot.background
+    # so there is never a colour mismatch around the plot edges.
+    observe({
+      dark <- isTRUE(shared$dark_mode())
+      if (dark) {
+        card_bg   <- "#1a1a2e"
+        header_bg <- "#12122a"
+        txt_col   <- "#dddddd"
+      } else {
+        card_bg   <- "#f5f0e8"
+        header_bg <- "#ede8de"
+        txt_col   <- ""          # inherit Bootstrap default
+      }
+      shinyjs::runjs(sprintf("
+        (function() {
+          var card = document.getElementById('%s');
+          if (card) card.style.backgroundColor = '%s';
+          var hdr = document.getElementById('%s');
+          if (hdr) { hdr.style.backgroundColor = '%s'; hdr.style.color = '%s'; }
+          var body = document.getElementById('%s');
+          if (body) body.style.backgroundColor = '%s';
+        })();
+      ",
+        ns("bouquet_card"),
+        card_bg,
+        ns("bouquet_card_header"),
+        header_bg, txt_col,
+        ns("bouquet_card_body"),
+        card_bg
+      ))
+    })
+
+    # ── Toggle empty state ↔ plot wrapper ─────────────────────────────────
+    # When a location is confirmed and data is ready, hide the placeholder
+    # and show the plot wrapper; revert when the location is cleared.
+    observe({
+      if (!is.null(clustered_ts())) {
+        shinyjs::hide("bouquet_empty")
+        shinyjs::show("bouquet_plot_wrap")
+      }
+    })
+
+    observeEvent(target_loc(), {
+      if (is.null(target_loc())) {
+        shinyjs::show("bouquet_empty")
+        shinyjs::hide("bouquet_plot_wrap")
+      }
+    }, ignoreNULL = FALSE)
+
     # ── Geocode status badge ──────────────────────────────────────────────
     output$geocode_status_ui <- renderUI({
       req(target_loc(), nearest_meta())
@@ -359,41 +449,13 @@ location_server <- function(id, gw_con, shared, meta_df) {
         )
       )
     })
-    # ── Bouquet UI (empty state vs plot) ───────────────────────────────────
-    output$bouquet_ui <- renderUI({
-      if (is.null(target_loc())) {
-        div(
-          style = paste(
-            "height:100%; display:flex; flex-direction:column;",
-            "align-items:center; justify-content:center;",
-            "color:#aaa; border: 2px dashed #d8cfc0; border-radius:8px; margin:16px;"
-          ),
-          tags$span(style = "font-size:3rem;", "\U0001F338"),
-          tags$p(style = "margin-top:12px; font-size:14px; text-align:center;",
-            "Enter a location in the sidebar", tags$br(),
-            "to explore nearby groundwater wells"
-          )
-        )
-      } else {
-        tagList(
-          div(id = ns("bouquet_spinner"),
-            style = paste(
-              "position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);",
-              "z-index:10; display:none;"
-            ),
-            tags$div(class = "spinner-border text-secondary", role = "status")
-          ),
-          plotOutput(ns("bouquet_static"), height = "100%",
-                     click = ns("bouquet_static_click"))
-        )
-      }
-    })
-
     # ── Static bouquet plot ──────────────────────────────────────────────
+    # bg = "transparent": the PNG device canvas has no colour of its own.
+    # The card CSS background (set by the JS dark-mode observer) shines
+    # through wherever ggplot doesn't paint, making it the single source
+    # of truth for the background colour — no more three-way mismatch.
     output$bouquet_static <- renderPlot({
       req(clustered_ts())
-      bg_col <- if (isTRUE(shared$dark_mode())) "#1a1a2e" else "white"
-      par(bg = bg_col)
 
       df          <- clustered_ts()
       use_cluster <- isTRUE(shared$show_cluster())
@@ -411,29 +473,36 @@ location_server <- function(id, gw_con, shared, meta_df) {
         value_col     = VALUE_COL
       )
 
-      p <- .build_bouquet(df, use_cluster, hw, inputs)
+      p <- patchwork::wrap_plots(.build_bouquet(df, use_cluster, hw, inputs))
 
       if (!isTRUE(shared$show_legend())) {
-        p <- patchwork::wrap_plots(p) & ggplot2::theme(legend.position = "none")
+        p <- p & ggplot2::theme(legend.position = "none")
       }
+
+      # Make both the outer frame and inner panel transparent so the card
+      # CSS background is the only background colour in play.
+      p <- p & ggplot2::theme(
+        plot.background  = ggplot2::element_blank(),
+        panel.background = ggplot2::element_blank()
+      )
       p
-    })
+    }, bg = "transparent")
 
     # ── Download handler ─────────────────────────────────────────────────
     output$download_bouquet <- downloadHandler(
       filename = function() {
-        am <- isTRUE(shared$annual_mean())
+        am   <- isTRUE(shared$annual_mean())
+        addr <- gsub("[^a-zA-Z0-9]", "_",
+                     trimws(confirmed_address() %||% "unknown"))
+        n    <- shared$n_wells()   %||% 5L
         if (am) {
-          sprintf("bouquet_%s_%dwells_annual_mean.png",
-                  gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
-                  shared$n_wells())
+          sprintf("bouquet_%s_%dwells_annual_mean.png", addr, n)
         } else {
-          sprintf("bouquet_%s_%dwells_%s_%d-%d.png",
-                  gsub("[^a-zA-Z0-9]", "_", trimws(input$address)),
-                  shared$n_wells(),
-                  shared$resolution(),
-                  shared$year_range()[1],
-                  shared$year_range()[2])
+          res <- shared$resolution() %||% "week"
+          yr  <- shared$year_range()
+          yr1 <- if (is.null(yr) || is.na(yr[1])) 2000L else as.integer(yr[1])
+          yr2 <- if (is.null(yr) || is.na(yr[2])) 2024L else as.integer(yr[2])
+          sprintf("bouquet_%s_%dwells_%s_%d-%d.png", addr, n, res, yr1, yr2)
         }
       },
       content = function(file) {
@@ -464,13 +533,15 @@ location_server <- function(id, gw_con, shared, meta_df) {
         )
 
         p      <- .build_bouquet(df, use_cluster, hw, inputs)
-        bg_col <- if (isTRUE(shared$dark_mode())) "#1a1a2e" else "#f8f8f5"
-        gg <- patchwork::wrap_plots(p)[[1L]] +
+        bg_col <- if (isTRUE(shared$dark_mode())) "#1a1a2e" else "#f5f0e8"
+        # Only override the outer plot frame colour — do NOT touch
+        # panel.background, which is owned by the bouquets package theme.
+        gg <- patchwork::wrap_plots(p) &
           ggplot2::theme(
             plot.background  = ggplot2::element_rect(fill = bg_col, colour = NA),
             panel.background = ggplot2::element_rect(fill = bg_col, colour = NA)
           )
-        ggplot2::ggsave(file, plot = gg, width = 12, height = 10,
+        ggplot2::ggsave(file, plot = gg, device = "png", width = 12, height = 10,
                         dpi = 300, bg = bg_col)
       }
     )
