@@ -307,39 +307,39 @@ ui <- bslib::page_navbar(
           )
         ),
 
-        # — Settings —
-        bslib::card(
-          bslib::card_header(
-            bsicons::bs_icon("sliders"), " Settings"
+        # — Settings & Plot options (collapsible) —
+        bslib::accordion(
+          open     = FALSE,
+          multiple = TRUE,
+          bslib::accordion_panel(
+            title = tagList(bsicons::bs_icon("sliders"), " Settings"),
+            value = "settings",
+            sliderInput(
+              "n_wells", "Number of nearest wells",
+              min = 2, max = 50, value = 15, step = 1
+            ),
+            sliderInput(
+              "year_range", "Time period",
+              min   = DB_YEAR_MIN, max = DB_YEAR_MAX,
+              value = c(DB_YEAR_MIN, DB_YEAR_MAX),
+              step  = 1, sep = ""
+            ),
+            shinyWidgets::sliderTextInput(
+              "resolution", "Temporal resolution",
+              choices  = c("week", "month", "quarter", "year"),
+              selected = "week",
+              grid     = TRUE
+            )
           ),
-          sliderInput(
-            "n_wells", "Number of nearest wells",
-            min = 2, max = 50, value = 15, step = 1
-          ),
-          sliderInput(
-            "year_range", "Time period",
-            min   = DB_YEAR_MIN, max = DB_YEAR_MAX,
-            value = c(DB_YEAR_MIN, DB_YEAR_MAX),
-            step  = 1, sep = ""
-          ),
-          shinyWidgets::sliderTextInput(
-            "resolution", "Temporal resolution",
-            choices  = c("week", "month", "quarter", "year"),
-            selected = "week",
-            grid     = TRUE
+          bslib::accordion_panel(
+            title = tagList(bsicons::bs_icon("palette"), " Plot options"),
+            value = "plot_options",
+            uiOutput("marker_every_ui"),
+            checkboxInput("show_labels",  "Show well labels",  value = FALSE),
+            checkboxInput("show_rings",   "Show rings",        value = FALSE),
+            checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
+            checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
           )
-        ),
-
-        # — Plot options —
-        bslib::card(
-          bslib::card_header(
-            bsicons::bs_icon("palette"), " Plot options"
-          ),
-          uiOutput("marker_every_ui"),
-          checkboxInput("show_labels",  "Show well labels",  value = FALSE),
-          checkboxInput("show_rings",   "Show rings",        value = FALSE),
-          checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
-          checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
         )
       ),  # /sidebar
 

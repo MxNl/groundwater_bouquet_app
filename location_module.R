@@ -40,30 +40,43 @@ location_panels_ui <- function(id) {
     # Bouquet plot card
     bslib::card(
       full_screen = TRUE,
-      style       = "background-color: #f5f0e8;",
+      # Override the Bootstrap CSS variable so both the card body AND the
+      # semi-transparent card-header cap (rgba(44,62,80,.03)) composite over
+      # exactly the same base colour as the ggplot plot/panel background.
+      style = "--bs-card-bg: #f8f8f5; background-color: #f8f8f5;",
       bslib::card_header(
-        style = "background-color: #ede8de;",
-        bsicons::bs_icon("flower1"), " Bouquet Plot",
+        # Remove default 0.5 rem vertical padding and use min-height + flex
+        # centering instead, so the btn-sm Download button (~31 px tall) sits
+        # inside the same 40 px strip as the plain-text map card header.
+        style = "padding: 0 1rem; min-height: 40px; display: flex; align-items: center;",
         div(
-          style = "float:right; display:flex; gap:6px; align-items:center;",
-          uiOutput(ns("reset_btn_ui")),
-          downloadButton(
-            ns("download_bouquet"), "Download",
-            class = "btn btn-sm btn-outline-primary"
+          style = "display:flex; align-items:center; justify-content:space-between; width:100%;",
+          span(bsicons::bs_icon("flower1"), " Bouquet Plot"),
+          div(
+            style = "display:flex; gap:6px; align-items:center;",
+            uiOutput(ns("reset_btn_ui")),
+            downloadButton(
+              ns("download_bouquet"), "Download",
+              class = "btn btn-sm btn-outline-primary"
+            )
           )
         )
       ),
       bslib::card_body(
         padding = 0,
-        style   = "background-color: #f5f0e8;",
+        style   = "background-color: #f8f8f5;",
         uiOutput(ns("bouquet_ui"))
       )
     ),
 
-    # Map card
+    # Map card — share the same --bs-card-bg so the transparent cap colour
+    # composites over the same base, giving both card-header strips an
+    # identical computed colour.
     bslib::card(
       full_screen = TRUE,
+      style = "--bs-card-bg: #f8f8f5;",
       bslib::card_header(
+        style = "min-height: 40px;",
         bsicons::bs_icon("map"), " Well Locations"
       ),
       bslib::card_body(
@@ -172,53 +185,112 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── State ─────────────────────────────────────────────────────────────
     target_loc        <- reactiveVal(NULL)
     confirmed_address <- reactiveVal(NULL)
+    # Internal trigger: set to the raw query string to kick off the geocode
+    # work in a *separate* observer, which guarantees the browser has already
+    # painted the spinner before the blocking network call begins.
+    .geocode_trigger  <- reactiveVal(NULL)
 
-    # ── Geocode on button click ───────────────────────────────────────────
+
+    # ── Step 1: button click — update UI immediately, then trigger work ───
+    # This observer finishes instantly (no blocking work), so Shiny flushes
+    # all pending UI updates to the browser (spinner + disabled button) before
+    # the .geocode_trigger observer runs.
     observeEvent(input$geocode_btn, {
-  query <- trimws(input$address)
-  req(nchar(query) > 0)
 
-  # Show spinner — these messages are queued but the browser won't paint
-  # them until R yields. shinyjs::delay() defers the blocking geocode call
-  # by one JS tick so the browser can render the spinner first.
-  shinyjs::html(ns("geocode_btn"), '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching\u2026')
-  shinyjs::disable(ns("geocode_btn"))
 
-  shinyjs::delay(50, {
-    cache_key <- tolower(query)
-    geocode_cache <- shared$geocode_cache
+      query <- trimws(input$address)
+      req(nchar(query) > 0)
 
-    if (exists(cache_key, envir = geocode_cache)) {
-      loc <- geocode_cache[[cache_key]]
-    } else {
-      tryCatch({
-        loc <- shared$geocode_address(query)
-        if (!is.na(loc$lat) && !is.na(loc$lon)) {
-          assign(cache_key, loc, envir = geocode_cache)
+
+
+
+
+
+      # Disable the button and swap its label for a spinner.
+      shinyjs::disable(ns("geocode_btn"))
+      shinyjs::html(
+        ns("geocode_btn"),
+        '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching\u2026'
+      )
+
+
+
+
+      # Store the query in the trigger reactiveVal.  Because this observer
+      # returns immediately, Shiny will flush the UI changes above to the
+      # browser *before* the second observer (below) runs.
+      .geocode_trigger(query)
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+
+
+
+
+
+
+
+    # ── Step 2: do the actual blocking geocode work ───────────────────────
+    observeEvent(.geocode_trigger(), {
+      query         <- .geocode_trigger()
+      cache_key     <- tolower(query)
+      geocode_cache <- shared$geocode_cache
+
+      loc <- tryCatch({
+        if (exists(cache_key, envir = geocode_cache)) {
+          geocode_cache[[cache_key]]
+        } else {
+          result <- shared$geocode_address(query)
+          if (!is.na(result$lat) && !is.na(result$lon)) {
+            assign(cache_key, result, envir = geocode_cache)
+          }
+          result
         }
       }, error = function(e) {
-        showNotification(paste("Geocoding error:", conditionMessage(e)),
-                         type = "error", duration = 8)
-        loc <<- list(lat = NA, lon = NA)
+
+
+
+        showNotification(
+          paste("Geocoding error:", conditionMessage(e)),
+          type = "error", duration = 8
+        )
+        list(lat = NA, lon = NA)
       })
-    }
 
-    if (is.na(loc$lat) || is.na(loc$lon)) {
-      showNotification("Address not found. Try a more specific query or a different spelling.",
-                       type = "warning", duration = 6)
-      target_loc(NULL)
-      confirmed_address(NULL)
-    } else {
-      target_loc(loc)
-      confirmed_address(query)
-    }
 
-    # Restore button after geocoding completes
-    shinyjs::html(ns("geocode_btn"),
-      '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells')
-    shinyjs::enable(ns("geocode_btn"))
-  })
-})
+
+
+
+
+
+
+
+
+
+      if (is.na(loc$lat) || is.na(loc$lon)) {
+        showNotification(
+          "Address not found. Try a more specific query or a different spelling.",
+          type = "warning", duration = 6
+        )
+        target_loc(NULL)
+        confirmed_address(NULL)
+      } else {
+        target_loc(loc)
+        confirmed_address(query)
+      }
+
+
+
+
+
+
+
+      # Restore the button regardless of success/failure.
+      shinyjs::html(
+        ns("geocode_btn"),
+        '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells'
+      )
+      shinyjs::enable(ns("geocode_btn"))
+    }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
     # ── Nearest wells ─────────────────────────────────────────────────────
     nearest_meta <- reactive({
@@ -383,7 +455,7 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── Static bouquet plot ──────────────────────────────────────────────
     output$bouquet_static <- renderPlot({
       req(clustered_ts())
-      bg_col <- if (isTRUE(shared$dark_mode())) "#1a1a2e" else "white"
+      bg_col <- if (isTRUE(shared$dark_mode())) "#1a1a2e" else "#f8f8f5"
       par(bg = bg_col)
 
       df          <- clustered_ts()
@@ -406,8 +478,16 @@ location_server <- function(id, gw_con, shared, meta_df) {
       if (!isTRUE(shared$show_legend())) {
         p <- patchwork::wrap_plots(p) & ggplot2::theme(legend.position = "none")
       }
-      p
-    })
+
+      # Force the patchwork *outer* background (title strip, inter-panel gaps)
+      # to the same colour as the ggplot panel background and the card body,
+      # so the long plot title doesn't appear on a contrasting white canvas.
+      p + patchwork::plot_annotation(
+        theme = ggplot2::theme(
+          plot.background = ggplot2::element_rect(fill = bg_col, colour = NA)
+        )
+      )
+    }, bg = "#f8f8f5")
 
     # ── Download handler ─────────────────────────────────────────────────
     output$download_bouquet <- downloadHandler(
