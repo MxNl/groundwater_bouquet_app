@@ -264,6 +264,24 @@ ui <- bslib::page_navbar(
           });
         });
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
       });
     "))
   ),
@@ -640,4 +658,3 @@ server <- function(input, output, session) {
 }  # /server
 
 shinyApp(ui, server)
-

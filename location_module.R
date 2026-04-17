@@ -185,53 +185,46 @@ location_server <- function(id, gw_con, shared, meta_df) {
     # ── State ─────────────────────────────────────────────────────────────
     target_loc        <- reactiveVal(NULL)
     confirmed_address <- reactiveVal(NULL)
-    # Internal trigger: set to the raw query string to kick off the geocode
-    # work in a *separate* observer, which guarantees the browser has already
-    # painted the spinner before the blocking network call begins.
-    .geocode_trigger  <- reactiveVal(NULL)
 
-
-    # ── Step 1: button click — update UI immediately, then trigger work ───
-    # This observer finishes instantly (no blocking work), so Shiny flushes
-    # all pending UI updates to the browser (spinner + disabled button) before
-    # the .geocode_trigger observer runs.
+    # ── Step 1: button click — show spinner, then bounce via browser ────────
+    # A single shinyjs::runjs() call does ALL DOM work directly in JS:
+    #   1. Disable the button + swap innerHTML to a Bootstrap spinner
+    #   2. requestAnimationFrame → setTimeout(0) ensures the browser actually
+    #      paints the spinner frame before we call Shiny.setInputValue() to
+    #      trigger Step 2 (the blocking geocode call on the R side).
+    # This avoids any issues with shinyjs::html()/disable() not finding
+    # dynamically-rendered uiOutput buttons inside Shiny modules.
     observeEvent(input$geocode_btn, {
-
-
       query <- trimws(input$address)
       req(nchar(query) > 0)
 
+      # Escape single quotes in the query for safe JS string interpolation
+      query_js <- gsub("'", "\\\\'", query)
+      btn_id   <- ns("geocode_btn")
+      input_id <- ns("geocode_trigger_js")
 
-
-
-
-
-      # Disable the button and swap its label for a spinner.
-      shinyjs::disable(ns("geocode_btn"))
-      shinyjs::html(
-        ns("geocode_btn"),
-        '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Searching\u2026'
+      js <- sprintf(
+        "var btn = document.getElementById('%s');
+         if (btn) {
+           btn.disabled = true;
+           btn.innerHTML = '<span class=\"spinner-border spinner-border-sm me-2\" role=\"status\" aria-hidden=\"true\"></span>Searching\u2026';
+         }
+         requestAnimationFrame(function() {
+           setTimeout(function() {
+             Shiny.setInputValue('%s', '%s', {priority: 'event'});
+           }, 0);
+         });",
+        btn_id, input_id, query_js
       )
 
-
-
-
-      # Store the query in the trigger reactiveVal.  Because this observer
-      # returns immediately, Shiny will flush the UI changes above to the
-      # browser *before* the second observer (below) runs.
-      .geocode_trigger(query)
+      shinyjs::runjs(js)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
-
-
-
-
-
-
-
-    # ── Step 2: do the actual blocking geocode work ───────────────────────
-    observeEvent(.geocode_trigger(), {
-      query         <- .geocode_trigger()
+    # ── Step 2: blocking geocode work — triggered by the browser bounce ───
+    # input$geocode_trigger_js is set by the JS "startGeocode" handler only
+    # after the browser has rendered the spinner frame.
+    observeEvent(input$geocode_trigger_js, {
+      query         <- input$geocode_trigger_js
       cache_key     <- tolower(query)
       geocode_cache <- shared$geocode_cache
 
@@ -246,25 +239,12 @@ location_server <- function(id, gw_con, shared, meta_df) {
           result
         }
       }, error = function(e) {
-
-
-
         showNotification(
           paste("Geocoding error:", conditionMessage(e)),
           type = "error", duration = 8
         )
         list(lat = NA, lon = NA)
       })
-
-
-
-
-
-
-
-
-
-
 
       if (is.na(loc$lat) || is.na(loc$lon)) {
         showNotification(
@@ -278,18 +258,16 @@ location_server <- function(id, gw_con, shared, meta_df) {
         confirmed_address(query)
       }
 
-
-
-
-
-
-
-      # Restore the button regardless of success/failure.
-      shinyjs::html(
-        ns("geocode_btn"),
-        '<i class="fa fa-magnifying-glass" role="presentation" aria-label="magnifying-glass icon"></i> Find nearest wells'
-      )
-      shinyjs::enable(ns("geocode_btn"))
+      # Restore the button regardless of success/failure — use direct JS
+      # to match the runjs() approach in Step 1.
+      shinyjs::runjs(sprintf(
+        "var btn = document.getElementById('%s');
+         if (btn) {
+           btn.disabled = false;
+           btn.innerHTML = '<i class=\"fa fa-magnifying-glass\" role=\"presentation\" aria-label=\"magnifying-glass icon\"></i> Find nearest wells';
+         }",
+        ns("geocode_btn")
+      ))
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
     # ── Nearest wells ─────────────────────────────────────────────────────
