@@ -264,23 +264,23 @@ ui <- bslib::page_navbar(
           });
         });
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        // Geocode round-trip handler.
+        // R (Observer 1) sends this message together with the shinyjs calls
+        // (disable + spinner HTML) in the same WebSocket batch. The browser
+        // executes them all synchronously in one microtask, so we must
+        // explicitly yield to the renderer before bouncing back to R.
+        //
+        // requestAnimationFrame fires BEFORE the next paint; the nested
+        // setTimeout(0) fires AFTER that paint has been committed to the
+        // screen. Only then do we call setInputValue to trigger Observer 2
+        // (the blocking geocode call).
+        Shiny.addCustomMessageHandler('startGeocode', function(msg) {
+          requestAnimationFrame(function() {
+            setTimeout(function() {
+              Shiny.setInputValue(msg.inputId, msg.query, {priority: 'event'});
+            }, 0);
+          });
+        });
 
       });
     "))
@@ -355,6 +355,7 @@ ui <- bslib::page_navbar(
             uiOutput("marker_every_ui"),
             checkboxInput("show_labels",  "Show well labels",  value = FALSE),
             checkboxInput("show_rings",   "Show rings",        value = FALSE),
+            checkboxInput("show_caption", "Show caption",      value = FALSE),
             checkboxInput("dark_mode",    "Dark mode",         value = FALSE),
             checkboxInput("show_cluster", "Colour by cluster", value = FALSE)
           )
@@ -602,7 +603,8 @@ server <- function(input, output, session) {
     show_labels  = reactive(input$show_labels),
     show_rings   = reactive(input$show_rings),
     dark_mode    = reactive(input$dark_mode),
-    show_cluster = reactive(input$show_cluster),
+    show_cluster  = reactive(input$show_cluster),
+    show_caption  = reactive(input$show_caption),
     marker_every = reactive(input$marker_every),
     show_legend  = reactive(FALSE),  # legend hidden by default
     # Column name / CRS constants — plain values, not reactives
@@ -646,7 +648,7 @@ server <- function(input, output, session) {
         "marker_every", "Time step markers",
         choices  = choices,
         selected = sel,
-        grid     = FALSE
+        grid     = TRUE
       )
     }
   })
